@@ -8,6 +8,7 @@ from aiogram.types import (
     InlineQueryResultArticle,
     InputTextMessageContent,
 )
+from aiogram.enums import ParseMode
 
 from config import TELEGRAM_BOT_TOKEN, BOT_USERNAME
 from perplexity_client import ask_perplexity
@@ -19,12 +20,36 @@ bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
 
+async def safe_reply(message: types.Message, text: str, **kwargs):
+    """Отправляет ответ, пробуя сначала Markdown, потом plain text."""
+    try:
+        await message.answer(text, parse_mode=ParseMode.MARKDOWN, **kwargs)
+    except Exception:
+        try:
+            await message.answer(text, parse_mode=None, **kwargs)
+        except Exception as e:
+            logger.error(f"Не удалось отправить сообщение: {e}")
+            await message.answer("Произошла ошибка при отправке ответа.", parse_mode=None)
+
+
+async def safe_reply_to(message: types.Message, text: str, **kwargs):
+    """Отправляет reply, пробуя сначала Markdown, потом plain text."""
+    try:
+        await message.reply(text, parse_mode=ParseMode.MARKDOWN, **kwargs)
+    except Exception:
+        try:
+            await message.reply(text, parse_mode=None, **kwargs)
+        except Exception as e:
+            logger.error(f"Не удалось отправить сообщение: {e}")
+            await message.reply("Произошла ошибка при отправке ответа.", parse_mode=None)
+
+
 # ---------- Команды ----------
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     await message.answer(
-        "Привет! 👋\n\n"
+        "Привет! \U0001f44b\n\n"
         "Я — ИИ-помощник с доступом к интернету.\n\n"
         "• Напиши мне любой вопрос в личку\n"
         "• Упомяни @" + BOT_USERNAME + " в группе\n"
@@ -35,10 +60,10 @@ async def cmd_start(message: types.Message):
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
     await message.answer(
-        "📖 Как пользоваться:\n\n"
-        "1️⃣ Личное сообщение — просто напиши вопрос\n"
-        "2️⃣ Группа — упомяни @" + BOT_USERNAME + "\n"
-        "3️⃣ Инлайн — в любом чате набери @" + BOT_USERNAME + " и вопрос"
+        "\U0001f4d6 Как пользоваться:\n\n"
+        "1\ufe0f\u20e3 Личное сообщение — просто напиши вопрос\n"
+        "2\ufe0f\u20e3 Группа — упомяни @" + BOT_USERNAME + "\n"
+        "3\ufe0f\u20e3 Инлайн — в любом чате набери @" + BOT_USERNAME + " и вопрос"
     )
 
 
@@ -48,9 +73,13 @@ async def cmd_help(message: types.Message):
 async def handle_private(message: types.Message):
     if not message.text:
         return
-    await bot.send_chat_action(message.chat.id, "typing")
-    answer = await ask_perplexity(message.text)
-    await message.answer(answer, parse_mode="Markdown")
+    try:
+        await bot.send_chat_action(message.chat.id, "typing")
+        answer = await ask_perplexity(message.text)
+        await safe_reply(message, answer)
+    except Exception as e:
+        logger.error(f"Ошибка в handle_private: {e}")
+        await message.answer(f"Ошибка: {e}", parse_mode=None)
 
 
 # ---------- Упоминание в группе ----------
@@ -69,9 +98,13 @@ async def handle_group(message: types.Message):
         await message.reply("Задай вопрос после упоминания.")
         return
 
-    await bot.send_chat_action(message.chat.id, "typing")
-    answer = await ask_perplexity(question)
-    await message.reply(answer, parse_mode="Markdown")
+    try:
+        await bot.send_chat_action(message.chat.id, "typing")
+        answer = await ask_perplexity(question)
+        await safe_reply_to(message, answer)
+    except Exception as e:
+        logger.error(f"Ошибка в handle_group: {e}")
+        await message.reply(f"Ошибка: {e}", parse_mode=None)
 
 
 # ---------- Инлайн-режим ----------
@@ -82,19 +115,30 @@ async def handle_inline(inline_query: InlineQuery):
     if not query_text:
         return
 
-    answer = await ask_perplexity(query_text)
-    short_answer = answer[:200] + "…" if len(answer) > 200 else answer
+    try:
+        answer = await ask_perplexity(query_text)
+        short_answer = answer[:200] + "…" if len(answer) > 200 else answer
 
-    result = InlineQueryResultArticle(
-        id="1",
-        title=f"Ответ на: {query_text[:50]}",
-        description=short_answer,
-        input_message_content=InputTextMessageContent(
-            message_text=answer[:4096],
-            parse_mode="Markdown",
-        ),
-    )
-    await inline_query.answer([result], cache_time=30)
+        result = InlineQueryResultArticle(
+            id="1",
+            title=f"Ответ на: {query_text[:50]}",
+            description=short_answer,
+            input_message_content=InputTextMessageContent(
+                message_text=answer[:4096],
+            ),
+        )
+        await inline_query.answer([result], cache_time=30)
+    except Exception as e:
+        logger.error(f"Ошибка в handle_inline: {e}")
+        result = InlineQueryResultArticle(
+            id="1",
+            title="Ошибка",
+            description=str(e)[:100],
+            input_message_content=InputTextMessageContent(
+                message_text=f"Ошибка: {e}",
+            ),
+        )
+        await inline_query.answer([result], cache_time=5)
 
 
 # ---------- Запуск ----------
