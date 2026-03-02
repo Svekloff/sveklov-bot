@@ -11,6 +11,9 @@ BOT_USERNAME = os.getenv("BOT_USERNAME", "SveklovBot")
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
 PERPLEXITY_MODEL = os.getenv("PERPLEXITY_MODEL", "sonar")
 
+# Groq API (Speech-to-Text)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+
 # Общие настройки
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "1024"))
 
