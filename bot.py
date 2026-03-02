@@ -1,165 +1,106 @@
-"""
-Telegram AI Bot — @SveklovBot
-Responds to @mentions in group chats and supports inline queries.
-Powered by Google Gemini with Google Search grounding (free tier).
-"""
-
 import asyncio
-import hashlib
 import logging
 
-from aiogram import Bot, Dispatcher, Router, F
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command, CommandStart
 from aiogram.types import (
-    Message,
     InlineQuery,
     InlineQueryResultArticle,
     InputTextMessageContent,
 )
-from aiogram.enums import ParseMode
-from aiogram.client.default import DefaultBotProperties
 
 from config import TELEGRAM_BOT_TOKEN, BOT_USERNAME
-from gemini_client import ask_ai
+from perplexity_client import ask_perplexity
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
-)
-logger = logging.getLogger("sveklov_bot")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-router = Router()
+bot = Bot(token=TELEGRAM_BOT_TOKEN)
+dp = Dispatcher()
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# ---------- Команды ----------
 
-def _extract_question(text: str, bot_username: str) -> str | None:
-    """Extract the question after @bot_username mention. Returns None if no mention."""
-    if not text:
-        return None
-
-    lower = text.lower()
-    mention = f"@{bot_username}"
-
-    if mention not in lower:
-        return None
-
-    idx = lower.index(mention)
-    question = (text[:idx] + text[idx + len(mention):]).strip()
-    return question if question else None
-
-
-def _truncate(text: str, limit: int = 4096) -> str:
-    """Truncate text to Telegram message limit."""
-    if len(text) <= limit:
-        return text
-    return text[: limit - 3] + "..."
-
-
-# ── Handlers ─────────────────────────────────────────────────────────────────
-
-@router.message(F.text.startswith("/start"))
-async def handle_start(message: Message) -> None:
+@dp.message(CommandStart())
+async def cmd_start(message: types.Message):
     await message.answer(
-        "👋 Привет! Я AI-бот на Google Gemini с поиском в интернете.\n\n"
-        "**Как использовать:**\n"
-        "• В группе — упомяните @SveklovBot и задайте вопрос\n"
-        "• В личке — просто напишите вопрос\n"
-        "• В любом чате — наберите `@SveklovBot ваш вопрос` (inline)\n\n"
-        "Я ищу актуальную информацию через Google и генерирую ответ.",
-        parse_mode=ParseMode.MARKDOWN,
+        "Привет! 👋\n\n"
+        "Я — ИИ-помощник с доступом к интернету.\n\n"
+        "• Напиши мне любой вопрос в личку\n"
+        "• Упомяни @" + BOT_USERNAME + " в группе\n"
+        "• Используй инлайн-режим: @" + BOT_USERNAME + " твой вопрос"
     )
 
 
-@router.message(F.text.startswith("/help"))
-async def handle_help(message: Message) -> None:
+@dp.message(Command("help"))
+async def cmd_help(message: types.Message):
     await message.answer(
-        "**Команды:**\n"
-        "/start — Приветствие\n"
-        "/help  — Эта справка\n\n"
-        "**Использование:**\n"
-        "• В группе: `@SveklovBot когда следующий запуск SpaceX?`\n"
-        "• Inline: `@SveklovBot курс биткоина`\n"
-        "• ЛС: просто напишите вопрос",
-        parse_mode=ParseMode.MARKDOWN,
+        "📖 Как пользоваться:\n\n"
+        "1️⃣ Личное сообщение — просто напиши вопрос\n"
+        "2️⃣ Группа — упомяни @" + BOT_USERNAME + "\n"
+        "3️⃣ Инлайн — в любом чате набери @" + BOT_USERNAME + " и вопрос"
     )
 
 
-@router.message(F.text)
-async def handle_mention(message: Message) -> None:
-    text = message.text or ""
-    chat_type = message.chat.type
+# ---------- Личные сообщения ----------
 
-    if chat_type == "private":
-        question = text.strip()
-    else:
-        question = _extract_question(text, BOT_USERNAME)
-        if question is None:
-            return
+@dp.message(F.chat.type == "private")
+async def handle_private(message: types.Message):
+    if not message.text:
+        return
+    await bot.send_chat_action(message.chat.id, "typing")
+    answer = await ask_perplexity(message.text)
+    await message.answer(answer, parse_mode="Markdown")
 
+
+# ---------- Упоминание в группе ----------
+
+@dp.message(F.chat.type.in_({"group", "supergroup"}))
+async def handle_group(message: types.Message):
+    if not message.text:
+        return
+
+    bot_tag = f"@{BOT_USERNAME}"
+    if bot_tag.lower() not in message.text.lower():
+        return
+
+    question = message.text.replace(bot_tag, "").replace(bot_tag.lower(), "").strip()
     if not question:
-        await message.reply("Задайте мне вопрос после @-упоминания.")
+        await message.reply("Задай вопрос после упоминания.")
         return
 
-    logger.info(
-        "Question from %s (chat %s): %s",
-        message.from_user.username if message.from_user else "?",
-        message.chat.id,
-        question[:80],
-    )
-
-    await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-
-    answer = await ask_ai(question)
-    await message.reply(_truncate(answer))
+    await bot.send_chat_action(message.chat.id, "typing")
+    answer = await ask_perplexity(question)
+    await message.reply(answer, parse_mode="Markdown")
 
 
-@router.inline_query()
-async def handle_inline_query(inline_query: InlineQuery) -> None:
-    query_text = (inline_query.query or "").strip()
+# ---------- Инлайн-режим ----------
 
-    if len(query_text) < 3:
-        await inline_query.answer(
-            results=[],
-            cache_time=5,
-            switch_pm_text="Введите вопрос (мин. 3 символа)",
-            switch_pm_parameter="help",
-        )
+@dp.inline_query()
+async def handle_inline(inline_query: InlineQuery):
+    query_text = inline_query.query.strip()
+    if not query_text:
         return
 
-    logger.info(
-        "Inline query from %s: %s",
-        inline_query.from_user.username if inline_query.from_user else "?",
-        query_text[:80],
+    answer = await ask_perplexity(query_text)
+    short_answer = answer[:200] + "…" if len(answer) > 200 else answer
+
+    result = InlineQueryResultArticle(
+        id="1",
+        title=f"Ответ на: {query_text[:50]}",
+        description=short_answer,
+        input_message_content=InputTextMessageContent(
+            message_text=answer[:4096],
+            parse_mode="Markdown",
+        ),
     )
-
-    answer = await ask_ai(query_text)
-    result_id = hashlib.md5(query_text.encode()).hexdigest()
-
-    results = [
-        InlineQueryResultArticle(
-            id=result_id,
-            title=f"🔍 {query_text[:64]}",
-            description=answer[:100] + "..." if len(answer) > 100 else answer,
-            input_message_content=InputTextMessageContent(
-                message_text=_truncate(answer),
-            ),
-        )
-    ]
-
-    await inline_query.answer(results=results, cache_time=30)
+    await inline_query.answer([result], cache_time=30)
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
+# ---------- Запуск ----------
 
-async def main() -> None:
-    bot = Bot(
-        token=TELEGRAM_BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode=None),
-    )
-    dp = Dispatcher()
-    dp.include_router(router)
-
-    logger.info("Bot starting…")
+async def main():
+    logger.info("Бот запущен")
     await dp.start_polling(bot)
 
 
