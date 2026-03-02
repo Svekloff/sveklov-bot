@@ -11,7 +11,7 @@ from aiogram.types import (
     BusinessConnection,
 )
 
-from config import TELEGRAM_BOT_TOKEN, BOT_USERNAME
+from config import TELEGRAM_BOT_TOKEN, BOT_USERNAME, BUSINESS_SYSTEM_PROMPT
 from perplexity_client import ask_perplexity
 
 logging.basicConfig(level=logging.INFO)
@@ -47,7 +47,7 @@ async def handle_business_connection(update: BusinessConnection):
         logger.info(f"[бизнес] Удалён connection_id для user={user.id}")
 
 
-# ---------- Бизнес-сообщения (ответ от имени владельца) ----------
+# ---------- Бизнес-сообщения (ответ от имени Алексея) ----------
 
 @dp.business_message()
 async def handle_business_message(message: types.Message):
@@ -71,8 +71,13 @@ async def handle_business_message(message: types.Message):
             action="typing",
             business_connection_id=conn_id,
         )
-        answer = await ask_perplexity(message.text)
-        logger.info(f"[бизнес ответ] len={len(answer)}")
+
+        # Используем бизнес-промпт: бот отвечает как Алексей
+        answer = await ask_perplexity(
+            message.text,
+            system_prompt=BUSINESS_SYSTEM_PROMPT,
+        )
+        logger.info(f"[бизнес ответ] len={len(answer)} text={answer[:80]!r}")
 
         result = await bot.send_message(
             chat_id=message.chat.id,
@@ -112,7 +117,7 @@ async def cmd_help(message: types.Message):
     )
 
 
-# ---------- Обычные сообщения (личка + группы) ----------
+# ---------- Обычные сообщения (личка бота + группы) ----------
 
 @dp.message(F.text)
 async def handle_message(message: types.Message):
