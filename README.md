@@ -1,65 +1,65 @@
-# @SveklovBot — Telegram AI-бот на Google Gemini
+# @SveklovBot — Telegram ИИ-ассистент
 
-AI-бот для Telegram, который отвечает на вопросы с актуальной информацией из интернета, используя [Google Gemini API](https://ai.google.dev) с Grounding through Google Search.
-
-## Стоимость
-
-**Бесплатно.** Free tier включает:
-- Безлимит на генерацию токенов (15 RPM)
-- 500 запросов с поиском Google в день
+Telegram-бот с ИИ на базе **Perplexity Sonar** — отвечает на вопросы с актуальной информацией из интернета.
 
 ## Возможности
 
-- **@mention в группах** — упомяните `@SveklovBot` с вопросом, бот ответит реплаем
-- **Inline-режим** — наберите `@SveklovBot запрос` в любом чате
-- **ЛС** — в личных сообщениях бот отвечает напрямую
-- **Google Search** — автоматический поиск актуальной информации с источниками
+- 💬 Личные сообщения — просто напиши вопрос боту
+- 👥 Групповые чаты — упомяни `@SveklovBot`
+- ⚡ Инлайн-режим — `@SveklovBot твой вопрос` в любом чате
+- 🌐 Актуальные данные — Perplexity Sonar ищет информацию в интернете
+
+## Стек
+
+- **Python 3.12** + **aiogram 3**
+- **Perplexity API** (модель `sonar` — самая дешёвая)
+- Docker / Docker Compose
 
 ## Быстрый старт
 
-### 1. Получить токены
+### 1. Клонирование
 
-1. **Telegram Bot Token** — создайте бота через [@BotFather](https://t.me/BotFather):
-   - `/newbot` → задайте имя и username → скопируйте токен
-   - **Inline Mode:** `/mybots` → бот → `Bot Settings` → `Inline Mode` → `Turn on`
-   - **Group Privacy:** `/mybots` → бот → `Bot Settings` → `Group Privacy` → `Turn off`
+```bash
+git clone https://github.com/Svekloff/sveklov-bot.git
+cd sveklov-bot
+```
 
-2. **Google Gemini API Key** — бесплатно на [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
-
-### 2. Настроить `.env`
+### 2. Настройка
 
 ```bash
 cp .env.example .env
-# Вставьте TELEGRAM_BOT_TOKEN и GEMINI_API_KEY
 ```
 
-### 3. Запустить
+Заполните `.env`:
 
-#### Docker
+| Переменная | Описание |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | Токен от @BotFather |
+| `PERPLEXITY_API_KEY` | API-ключ Perplexity (`pplx-...`) |
+| `BOT_USERNAME` | Имя бота без `@` |
+
+### 3. Запуск через Docker
 
 ```bash
 docker compose up -d --build
 ```
 
-#### Без Docker
+### 4. Логи
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python bot.py
+docker compose logs -f
 ```
 
-## Переменные окружения
+## Настройка BotFather
 
-| Переменная | Описание | По умолчанию |
-|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | Токен от BotFather | — |
-| `GEMINI_API_KEY` | Ключ Google Gemini API | — |
-| `GEMINI_MODEL` | Модель | `gemini-2.5-flash` |
-| `SYSTEM_PROMPT` | Личность бота | см. `.env.example` |
-| `MAX_TOKENS` | Макс. длина ответа | `1024` |
-| `BOT_USERNAME` | Username бота (без @) | `SveklovBot` |
+1. Включите **Inline Mode**: `/mybots` → ваш бот → Bot Settings → Inline Mode → Enable
+2. Отключите **Group Privacy**: `/mybots` → Bot Settings → Group Privacy → Disable
+
+## Perplexity API
+
+- Получить ключ: [perplexity.ai/settings/api](https://www.perplexity.ai/settings/api)
+- Модель `sonar` — самая дешёвая ($1/M токенов вход / $1/M токенов выход)
+- Документация: [docs.perplexity.ai](https://docs.perplexity.ai)
 
 ## Лицензия
 
