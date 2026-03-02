@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import traceback
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart
@@ -8,7 +9,6 @@ from aiogram.types import (
     InlineQueryResultArticle,
     InputTextMessageContent,
 )
-from aiogram.enums import ParseMode
 
 from config import TELEGRAM_BOT_TOKEN, BOT_USERNAME
 from perplexity_client import ask_perplexity
@@ -18,20 +18,6 @@ logger = logging.getLogger(__name__)
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
-
-
-async def safe_send(message: types.Message, text: str, reply: bool = False):
-    """Отправляет сообщение: сначала Markdown, при ошибке — plain text."""
-    send = message.reply if reply else message.answer
-    try:
-        await send(text, parse_mode=ParseMode.MARKDOWN)
-    except Exception as md_err:
-        logger.warning(f"Markdown не удался, отправляю plain text: {md_err}")
-        try:
-            await send(text, parse_mode=None)
-        except Exception as e:
-            logger.error(f"Не удалось отправить сообщение: {e}")
-            await send("Произошла ошибка при отправке ответа.", parse_mode=None)
 
 
 # ---------- Команды ----------
@@ -52,10 +38,10 @@ async def cmd_start(message: types.Message):
 async def cmd_help(message: types.Message):
     logger.info(f"[/help] chat_type={message.chat.type} user={message.from_user.id}")
     await message.answer(
-        "\U0001f4d6 Как пользоваться:\n\n"
-        "1\ufe0f\u20e3 Личное сообщение — просто напиши вопрос\n"
-        "2\ufe0f\u20e3 Группа — упомяни @" + BOT_USERNAME + "\n"
-        "3\ufe0f\u20e3 Инлайн — в любом чате набери @" + BOT_USERNAME + " и вопрос"
+        "Как пользоваться:\n\n"
+        "1. Личное сообщение — просто напиши вопрос\n"
+        "2. Группа — упомяни @" + BOT_USERNAME + "\n"
+        "3. Инлайн — в любом чате набери @" + BOT_USERNAME + " и вопрос"
     )
 
 
@@ -72,7 +58,6 @@ async def handle_message(message: types.Message):
     is_group = message.chat.type in ("group", "supergroup")
 
     if is_group:
-        # В группе реагируем только на упоминания
         bot_tag = f"@{BOT_USERNAME}"
         if bot_tag.lower() not in message.text.lower():
             return
@@ -90,13 +75,20 @@ async def handle_message(message: types.Message):
         logger.info(f"[запрос Perplexity] question={question[:80]!r}")
         answer = await ask_perplexity(question)
         logger.info(f"[ответ Perplexity] len={len(answer)} answer={answer[:100]!r}")
-        await safe_send(message, answer, reply=is_group)
     except Exception as e:
-        logger.error(f"Ошибка обработки: {e}", exc_info=True)
-        try:
-            await message.answer(f"Ошибка: {e}", parse_mode=None)
-        except Exception:
-            pass
+        logger.error(f"[ошибка Perplexity] {e}")
+        answer = f"Ошибка при запросе: {e}"
+
+    # Отправка без Markdown — чистый текст
+    try:
+        if is_group:
+            await message.reply(answer[:4096], parse_mode=None)
+        else:
+            await message.answer(answer[:4096], parse_mode=None)
+        logger.info("[отправка] OK")
+    except Exception as e:
+        logger.error(f"[отправка] FAILED: {e}")
+        logger.error(traceback.format_exc())
 
 
 # ---------- Инлайн-режим ----------
