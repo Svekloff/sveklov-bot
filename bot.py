@@ -20,34 +20,25 @@ bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
 
-async def safe_reply(message: types.Message, text: str, **kwargs):
-    """Отправляет ответ, пробуя сначала Markdown, потом plain text."""
+async def safe_send(message: types.Message, text: str, reply: bool = False):
+    """Отправляет сообщение: сначала Markdown, при ошибке — plain text."""
+    send = message.reply if reply else message.answer
     try:
-        await message.answer(text, parse_mode=ParseMode.MARKDOWN, **kwargs)
-    except Exception:
+        await send(text, parse_mode=ParseMode.MARKDOWN)
+    except Exception as md_err:
+        logger.warning(f"Markdown не удался, отправляю plain text: {md_err}")
         try:
-            await message.answer(text, parse_mode=None, **kwargs)
+            await send(text, parse_mode=None)
         except Exception as e:
             logger.error(f"Не удалось отправить сообщение: {e}")
-            await message.answer("Произошла ошибка при отправке ответа.", parse_mode=None)
-
-
-async def safe_reply_to(message: types.Message, text: str, **kwargs):
-    """Отправляет reply, пробуя сначала Markdown, потом plain text."""
-    try:
-        await message.reply(text, parse_mode=ParseMode.MARKDOWN, **kwargs)
-    except Exception:
-        try:
-            await message.reply(text, parse_mode=None, **kwargs)
-        except Exception as e:
-            logger.error(f"Не удалось отправить сообщение: {e}")
-            await message.reply("Произошла ошибка при отправке ответа.", parse_mode=None)
+            await send("Произошла ошибка при отправке ответа.", parse_mode=None)
 
 
 # ---------- Команды ----------
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
+    logger.info(f"[/start] chat_type={message.chat.type} user={message.from_user.id}")
     await message.answer(
         "Привет! \U0001f44b\n\n"
         "Я — ИИ-помощник с доступом к интернету.\n\n"
@@ -59,6 +50,7 @@ async def cmd_start(message: types.Message):
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
+    logger.info(f"[/help] chat_type={message.chat.type} user={message.from_user.id}")
     await message.answer(
         "\U0001f4d6 Как пользоваться:\n\n"
         "1\ufe0f\u20e3 Личное сообщение — просто напиши вопрос\n"
@@ -67,44 +59,44 @@ async def cmd_help(message: types.Message):
     )
 
 
-# ---------- Личные сообщения ----------
+# ---------- Все текстовые сообщения (личка + группы) ----------
 
-@dp.message(F.chat.type == "private")
-async def handle_private(message: types.Message):
-    if not message.text:
-        return
-    try:
-        await bot.send_chat_action(message.chat.id, "typing")
-        answer = await ask_perplexity(message.text)
-        await safe_reply(message, answer)
-    except Exception as e:
-        logger.error(f"Ошибка в handle_private: {e}")
-        await message.answer(f"Ошибка: {e}", parse_mode=None)
+@dp.message(F.text)
+async def handle_message(message: types.Message):
+    logger.info(
+        f"[сообщение] chat_type={message.chat.type} "
+        f"user={message.from_user.id} text={message.text[:50]!r}"
+    )
 
+    is_private = message.chat.type == "private"
+    is_group = message.chat.type in ("group", "supergroup")
 
-# ---------- Упоминание в группе ----------
-
-@dp.message(F.chat.type.in_({"group", "supergroup"}))
-async def handle_group(message: types.Message):
-    if not message.text:
-        return
-
-    bot_tag = f"@{BOT_USERNAME}"
-    if bot_tag.lower() not in message.text.lower():
-        return
-
-    question = message.text.replace(bot_tag, "").replace(bot_tag.lower(), "").strip()
-    if not question:
-        await message.reply("Задай вопрос после упоминания.")
+    if is_group:
+        # В группе реагируем только на упоминания
+        bot_tag = f"@{BOT_USERNAME}"
+        if bot_tag.lower() not in message.text.lower():
+            return
+        question = message.text.replace(bot_tag, "").replace(bot_tag.lower(), "").strip()
+        if not question:
+            await message.reply("Задай вопрос после упоминания.")
+            return
+    elif is_private:
+        question = message.text
+    else:
         return
 
     try:
         await bot.send_chat_action(message.chat.id, "typing")
+        logger.info(f"[запрос Perplexity] question={question[:80]!r}")
         answer = await ask_perplexity(question)
-        await safe_reply_to(message, answer)
+        logger.info(f"[ответ Perplexity] len={len(answer)} answer={answer[:100]!r}")
+        await safe_send(message, answer, reply=is_group)
     except Exception as e:
-        logger.error(f"Ошибка в handle_group: {e}")
-        await message.reply(f"Ошибка: {e}", parse_mode=None)
+        logger.error(f"Ошибка обработки: {e}", exc_info=True)
+        try:
+            await message.answer(f"Ошибка: {e}", parse_mode=None)
+        except Exception:
+            pass
 
 
 # ---------- Инлайн-режим ----------
@@ -144,7 +136,7 @@ async def handle_inline(inline_query: InlineQuery):
 # ---------- Запуск ----------
 
 async def main():
-    logger.info("Бот запущен")
+    logger.info(f"Бот запущен. BOT_USERNAME={BOT_USERNAME}")
     await dp.start_polling(bot)
 
 
