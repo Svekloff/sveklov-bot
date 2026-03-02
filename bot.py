@@ -13,6 +13,7 @@ from aiogram.types import (
 
 from config import TELEGRAM_BOT_TOKEN, BOT_USERNAME, BUSINESS_SYSTEM_PROMPT
 from perplexity_client import ask_perplexity
+from speech_to_text import transcribe_voice
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -51,18 +52,40 @@ async def handle_business_connection(update: BusinessConnection):
 
 @dp.business_message()
 async def handle_business_message(message: types.Message):
-    """Обрабатывает сообщения от клиентов в бизнес-чатах."""
-    if not message.text:
-        return
-
+    """Обрабатывает сообщения от клиентов в бизнес-чатах (текст + голос)."""
     conn_id = message.business_connection_id
     if not conn_id:
+        return
+
+    # Определяем текст: из текстового или голосового сообщения
+    if message.voice:
+        logger.info(
+            f"[бизнес голос] chat_id={message.chat.id} "
+            f"user={message.from_user.id} conn_id={conn_id} "
+            f"duration={message.voice.duration}s"
+        )
+        try:
+            await bot.send_chat_action(
+                chat_id=message.chat.id,
+                action="typing",
+                business_connection_id=conn_id,
+            )
+            question = await _transcribe_voice(message)
+            if not question:
+                return
+        except Exception as e:
+            logger.error(f"[бизнес голос ошибка] {e}")
+            logger.error(traceback.format_exc())
+            return
+    elif message.text:
+        question = message.text
+    else:
         return
 
     logger.info(
         f"[бизнес сообщение] chat_id={message.chat.id} "
         f"user={message.from_user.id} conn_id={conn_id} "
-        f"text={message.text[:50]!r}"
+        f"text={question[:50]!r}"
     )
 
     try:
@@ -74,7 +97,7 @@ async def handle_business_message(message: types.Message):
 
         # Используем бизнес-промпт: бот отвечает как Алексей
         answer = await ask_perplexity(
-            message.text,
+            question,
             system_prompt=BUSINESS_SYSTEM_PROMPT,
         )
         logger.info(f"[бизнес ответ] len={len(answer)} text={answer[:80]!r}")
@@ -115,6 +138,59 @@ async def cmd_help(message: types.Message):
         "2. Группа — упомяни @" + BOT_USERNAME + "\n"
         "3. Инлайн — @" + BOT_USERNAME + " и вопрос"
     )
+
+
+# ---------- Голосовые сообщения (личка бота) ----------
+
+async def _transcribe_voice(message: types.Message) -> str | None:
+    """Скачивает голосовое сообщение и транскрибирует через Groq Whisper."""
+    voice = message.voice
+    file = await bot.get_file(voice.file_id)
+    file_data = await bot.download_file(file.file_path)
+
+    # file_data — BytesIO объект
+    audio_bytes = file_data.read()
+    logger.info(f"[голос] скачано {len(audio_bytes)} байт, duration={voice.duration}s")
+
+    text = await transcribe_voice(audio_bytes)
+    if not text:
+        logger.warning("[голос] пустая транскрипция")
+        return None
+
+    logger.info(f"[голос транскрипция] {text[:100]!r}")
+    return text
+
+
+@dp.message(F.voice)
+async def handle_voice(message: types.Message):
+    """Обрабатывает голосовые сообщения в личке бота."""
+    if message.chat.type != "private":
+        return
+
+    logger.info(
+        f"[голос] chat_id={message.chat.id} user={message.from_user.id} "
+        f"duration={message.voice.duration}s"
+    )
+
+    try:
+        await bot.send_chat_action(message.chat.id, "typing")
+        question = await _transcribe_voice(message)
+        if not question:
+            await message.reply("Не удалось распознать голосовое сообщение.")
+            return
+
+        await bot.send_chat_action(message.chat.id, "typing")
+        answer = await ask_perplexity(question)
+        logger.info(f"[голос ответ] len={len(answer)}")
+        result = await bot.send_message(
+            chat_id=message.chat.id,
+            text=answer[:4096],
+            reply_to_message_id=message.message_id,
+        )
+        logger.info(f"[голос отправка OK] message_id={result.message_id}")
+    except Exception as e:
+        logger.error(f"[голос ошибка] {e}")
+        logger.error(traceback.format_exc())
 
 
 # ---------- Обычные сообщения (личка бота + группы) ----------
