@@ -1,7 +1,7 @@
 """
 Telegram AI Bot — @SveklovBot
 Responds to @mentions in group chats and supports inline queries.
-Powered by Perplexity Sonar API.
+Powered by Google Gemini with Google Search grounding (free tier).
 """
 
 import asyncio
@@ -19,7 +19,7 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
 from config import TELEGRAM_BOT_TOKEN, BOT_USERNAME
-from perplexity_client import ask_perplexity
+from gemini_client import ask_ai
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,7 +43,6 @@ def _extract_question(text: str, bot_username: str) -> str | None:
     if mention not in lower:
         return None
 
-    # Remove the mention and strip whitespace
     idx = lower.index(mention)
     question = (text[:idx] + text[idx + len(mention):]).strip()
     return question if question else None
@@ -60,47 +59,42 @@ def _truncate(text: str, limit: int = 4096) -> str:
 
 @router.message(F.text.startswith("/start"))
 async def handle_start(message: Message) -> None:
-    """Handle /start command."""
     await message.answer(
-        "👋 Привет! Я AI-бот, работающий на Perplexity Sonar.\n\n"
+        "👋 Привет! Я AI-бот на Google Gemini с поиском в интернете.\n\n"
         "**Как использовать:**\n"
         "• В группе — упомяните @SveklovBot и задайте вопрос\n"
         "• В личке — просто напишите вопрос\n"
-        "• В любом чате — наберите `@SveklovBot ваш вопрос` (inline-режим)\n\n"
-        "Я ищу актуальную информацию в интернете и генерирую ответ.",
+        "• В любом чате — наберите `@SveklovBot ваш вопрос` (inline)\n\n"
+        "Я ищу актуальную информацию через Google и генерирую ответ.",
         parse_mode=ParseMode.MARKDOWN,
     )
 
 
 @router.message(F.text.startswith("/help"))
 async def handle_help(message: Message) -> None:
-    """Handle /help command."""
     await message.answer(
         "**Команды:**\n"
         "/start — Приветствие\n"
         "/help  — Эта справка\n\n"
         "**Использование:**\n"
         "• В группе: `@SveklovBot когда следующий запуск SpaceX?`\n"
-        "• Inline:   `@SveklovBot курс биткоина`\n"
-        "• ЛС:      просто напишите вопрос",
+        "• Inline: `@SveklovBot курс биткоина`\n"
+        "• ЛС: просто напишите вопрос",
         parse_mode=ParseMode.MARKDOWN,
     )
 
 
 @router.message(F.text)
 async def handle_mention(message: Message) -> None:
-    """Handle messages that mention the bot in groups or direct messages."""
     text = message.text or ""
     chat_type = message.chat.type
 
-    # In private chats — answer everything
     if chat_type == "private":
         question = text.strip()
     else:
-        # In groups — answer only when mentioned
         question = _extract_question(text, BOT_USERNAME)
         if question is None:
-            return  # Not for us
+            return
 
     if not question:
         await message.reply("Задайте мне вопрос после @-упоминания.")
@@ -113,20 +107,17 @@ async def handle_mention(message: Message) -> None:
         question[:80],
     )
 
-    # Show "typing…" while Perplexity processes the query
     await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
 
-    answer = await ask_perplexity(question)
+    answer = await ask_ai(question)
     await message.reply(_truncate(answer))
 
 
 @router.inline_query()
 async def handle_inline_query(inline_query: InlineQuery) -> None:
-    """Handle inline queries — user types @SveklovBot <question> in any chat."""
     query_text = (inline_query.query or "").strip()
 
     if len(query_text) < 3:
-        # Too short — show a hint
         await inline_query.answer(
             results=[],
             cache_time=5,
@@ -141,9 +132,7 @@ async def handle_inline_query(inline_query: InlineQuery) -> None:
         query_text[:80],
     )
 
-    answer = await ask_perplexity(query_text)
-
-    # Generate a deterministic ID for caching
+    answer = await ask_ai(query_text)
     result_id = hashlib.md5(query_text.encode()).hexdigest()
 
     results = [
