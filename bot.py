@@ -71,6 +71,36 @@ def _strip_bot_mention(text: str) -> str:
     return result.strip()
 
 
+def _get_reply_context(message: types.Message) -> str | None:
+    """Извлекает текст сообщения, на которое ответили (reply).
+
+    Возвращает контекст в формате:
+    'Имя написал: текст сообщения'
+    """
+    reply = message.reply_to_message
+    if not reply:
+        return None
+
+    # Собираем текст из reply
+    reply_text = reply.text or reply.caption or ""
+    if not reply_text:
+        return None
+
+    # Имя автора оригинального сообщения
+    author = ""
+    if reply.from_user:
+        author = reply.from_user.first_name or ""
+        if reply.from_user.last_name:
+            author += f" {reply.from_user.last_name}"
+    author = author.strip() or "Кто-то"
+
+    # Ограничиваем длину, чтобы не раздувать промпт
+    if len(reply_text) > 500:
+        reply_text = reply_text[:500] + "…"
+
+    return f"{author} написал: {reply_text}"
+
+
 # ---------- Отслеживание групп ----------
 
 @dp.my_chat_member()
@@ -84,11 +114,9 @@ async def handle_my_chat_member(update: ChatMemberUpdated):
     old_status = update.old_chat_member.status
 
     if new_status in ("member", "administrator") and old_status in ("left", "kicked"):
-        # Бот добавлен в группу
         group_manager.register_group(chat.id, chat.title or f"Группа {chat.id}")
         logger.info(f"[группы] бот добавлен в: {chat.id} ({chat.title})")
     elif new_status in ("left", "kicked") and old_status in ("member", "administrator"):
-        # Бот удалён из группы
         group_manager.unregister_group(chat.id)
         logger.info(f"[группы] бот удалён из: {chat.id} ({chat.title})")
 
@@ -190,7 +218,6 @@ async def handle_toggle_group(callback: CallbackQuery):
     else:
         await callback.answer(f"Бот выключен в «{group_name}»")
 
-    # Обновляем сообщение с новой клавиатурой
     text = _groups_status_text()
     keyboard = _build_groups_keyboard()
     await callback.message.edit_text(text, reply_markup=keyboard)
@@ -309,7 +336,6 @@ async def cmd_start(message: types.Message):
     logger.info(f"[/start] chat_id={message.chat.id} user={message.from_user.id}")
 
     if _is_owner(message.from_user.id) and message.chat.type == "private":
-        # Для владельца показываем расширенное меню
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Управление группами", callback_data="open_groups")]
         ])
@@ -442,6 +468,11 @@ async def handle_photo(message: types.Message):
         if not _is_bot_mentioned(caption):
             return
         question = _strip_bot_mention(caption)
+
+        # Если это reply на другое сообщение — добавляем контекст
+        reply_context = _get_reply_context(message)
+        if reply_context:
+            question = f"[Контекст — сообщение, на которое отвечают: {reply_context}]\n{question}"
     elif is_private:
         question = message.caption or ""
     else:
@@ -521,6 +552,11 @@ async def handle_message(message: types.Message):
         if not question:
             await message.reply("Задай вопрос после упоминания.")
             return
+
+        # Если это reply на другое сообщение — добавляем контекст
+        reply_context = _get_reply_context(message)
+        if reply_context:
+            question = f"[Контекст — сообщение, на которое отвечают: {reply_context}]\n{question}"
     elif is_private:
         question = message.text
     else:
