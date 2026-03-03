@@ -1,66 +1,41 @@
-# @SveklovBot — Telegram ИИ-ассистент
+# SveklovBot
 
-Telegram-бот с ИИ на базе **Perplexity Sonar** — отвечает на вопросы с актуальной информацией из интернета.
+Telegram ИИ-помощник с поддержкой текста, голоса, картинок и бизнес-режима.
 
 ## Возможности
 
-- 💬 Личные сообщения — просто напиши вопрос боту
-- 👥 Групповые чаты — упомяни `@SveklovBot`
-- ⚡ Инлайн-режим — `@SveklovBot твой вопрос` в любом чате
-- 🌐 Актуальные данные — Perplexity Sonar ищет информацию в интернете
+- **Личные сообщения** — отвечает на текст и голос
+- **Групповые чаты** — отвечает по упоминанию @SveklovBot, комментирует картинки и мемы
+- **Бизнес-режим** — отвечает от имени владельца аккаунта (Telegram Business)
+- **Inline-режим** — @SveklovBot запрос в любом чате
+- **Vision** — анализ картинок через Groq Vision (Llama 4 Scout)
+- **Голос** — распознавание через Groq Whisper
 
 ## Стек
 
-- **Python 3.12** + **aiogram 3**
-- **Perplexity API** (модель `sonar` — самая дешёвая)
-- Docker / Docker Compose
+- Python 3.12 + aiogram 3
+- Perplexity Sonar API (текстовые ответы)
+- Groq API (Whisper для голоса, Llama 4 Scout для картинок)
+- Docker + Railway
 
-## Быстрый старт
+## Настройка
 
-### 1. Клонирование
+1. Скопировать `.env.example` → `.env`
+2. Заполнить токены
+3. (Опционально) Указать `ALLOWED_GROUPS` для ограничения групп
 
-```bash
-git clone https://github.com/Svekloff/sveklov-bot.git
-cd sveklov-bot
-```
+### Узнать chat_id группы
 
-### 2. Настройка
+Добавьте бота в группу и отправьте `/chatid`.
 
-```bash
-cp .env.example .env
-```
-
-Заполните `.env`:
-
-| Переменная | Описание |
-|---|---|
-| `TELEGRAM_BOT_TOKEN` | Токен от @BotFather |
-| `PERPLEXITY_API_KEY` | API-ключ Perplexity (`pplx-...`) |
-| `BOT_USERNAME` | Имя бота без `@` |
-
-### 3. Запуск через Docker
+## Запуск
 
 ```bash
-docker compose up -d --build
+docker compose up -d
 ```
 
-### 4. Логи
+## Команды
 
-```bash
-docker compose logs -f
-```
-
-## Настройка BotFather
-
-1. Включите **Inline Mode**: `/mybots` → ваш бот → Bot Settings → Inline Mode → Enable
-2. Отключите **Group Privacy**: `/mybots` → Bot Settings → Group Privacy → Disable
-
-## Perplexity API
-
-- Получить ключ: [perplexity.ai/settings/api](https://www.perplexity.ai/settings/api)
-- Модель `sonar` — самая дешёвая ($1/M токенов вход / $1/M токенов выход)
-- Документация: [docs.perplexity.ai](https://docs.perplexity.ai)
-
-## Лицензия
-
-MIT
+- `/start` — приветствие
+- `/help` — инструкция
+- `/chatid` — показать chat_id текущего чата
