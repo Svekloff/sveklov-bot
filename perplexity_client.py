@@ -10,9 +10,28 @@ def clean_citations(text: str) -> str:
     return re.sub(r'\[\d+\]', '', text).strip()
 
 
-async def ask_perplexity(question: str, system_prompt: str | None = None) -> str:
-    """Отправляет вопрос в Perplexity API и возвращает ответ."""
+async def ask_perplexity(
+    question: str,
+    system_prompt: str | None = None,
+    history: list[dict] | None = None,
+) -> str:
+    """Отправляет вопрос в Perplexity API и возвращает ответ.
+
+    Args:
+        question: текст текущего вопроса
+        system_prompt: кастомный системный промпт (бизнес-режим)
+        history: список предыдущих сообщений [{role, content}, ...]
+    """
     prompt = system_prompt if system_prompt else SYSTEM_PROMPT
+
+    messages = [{"role": "system", "content": prompt}]
+
+    # Добавляем историю диалога (если есть)
+    if history:
+        messages.extend(history)
+
+    # Добавляем текущий вопрос
+    messages.append({"role": "user", "content": question})
 
     headers = {
         "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
@@ -20,10 +39,7 @@ async def ask_perplexity(question: str, system_prompt: str | None = None) -> str
     }
     payload = {
         "model": PERPLEXITY_MODEL,
-        "messages": [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": question},
-        ],
+        "messages": messages,
         "max_tokens": MAX_TOKENS,
     }
 
