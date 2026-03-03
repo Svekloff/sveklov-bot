@@ -14,13 +14,15 @@ async def ask_perplexity(
     question: str,
     system_prompt: str | None = None,
     history: list[dict] | None = None,
+    image_context: str | None = None,
 ) -> str:
     """Отправляет вопрос в Perplexity API и возвращает ответ.
 
     Args:
         question: текст текущего вопроса
-        system_prompt: кастомный системный промпт (бизнес-режим)
+        system_prompt: кастомный системный промпт (бизнес-режим / группы)
         history: список предыдущих сообщений [{role, content}, ...]
+        image_context: описание изображения от vision-модели (для групп)
     """
     prompt = system_prompt if system_prompt else SYSTEM_PROMPT
 
@@ -30,8 +32,16 @@ async def ask_perplexity(
     if history:
         messages.extend(history)
 
+    # Если есть контекст изображения — добавляем его к вопросу
+    user_content = question
+    if image_context:
+        user_content = (
+            f"[Собеседник отправил картинку. Описание картинки: {image_context}]\n"
+            f"{question if question else 'Прокомментируй эту картинку.'}"
+        )
+
     # Добавляем текущий вопрос
-    messages.append({"role": "user", "content": question})
+    messages.append({"role": "user", "content": user_content})
 
     headers = {
         "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
@@ -52,7 +62,7 @@ async def ask_perplexity(
                 return f"Ошибка API ({resp.status}): {error_text}"
             data = await resp.json()
             text = data["choices"][0]["message"]["content"]
-            # Убираем сноски если используется кастомный промпт (бизнес-режим)
+            # Убираем сноски если используется кастомный промпт
             if system_prompt:
                 text = clean_citations(text)
             return text
