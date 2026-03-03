@@ -12,9 +12,17 @@ from aiogram.types import (
     BusinessConnection,
 )
 
-from config import TELEGRAM_BOT_TOKEN, BOT_USERNAME, BUSINESS_SYSTEM_PROMPT, MAX_HISTORY
+from config import (
+    TELEGRAM_BOT_TOKEN,
+    BOT_USERNAME,
+    BUSINESS_SYSTEM_PROMPT,
+    GROUP_SYSTEM_PROMPT,
+    MAX_HISTORY,
+    ALLOWED_GROUPS,
+)
 from perplexity_client import ask_perplexity
 from speech_to_text import transcribe_voice
+from image_analyzer import analyze_image
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -41,6 +49,28 @@ def _add_to_history(chat_id: int, role: str, content: str) -> None:
 def _get_history(chat_id: int) -> list[dict]:
     """Возвращает копию истории для передачи в API."""
     return list(chat_histories[chat_id])
+
+
+def _is_group_allowed(chat_id: int) -> bool:
+    """Проверяет, есть ли группа в белом списке. Если список пуст — разрешены все."""
+    if not ALLOWED_GROUPS:
+        return True
+    return chat_id in ALLOWED_GROUPS
+
+
+def _is_bot_mentioned(text: str) -> bool:
+    """Проверяет, упомянут ли бот в тексте."""
+    if not text:
+        return False
+    bot_tag = f"@{BOT_USERNAME}"
+    return bot_tag.lower() in text.lower()
+
+
+def _strip_bot_mention(text: str) -> str:
+    """Убирает упоминание бота из текста."""
+    bot_tag = f"@{BOT_USERNAME}"
+    result = text.replace(bot_tag, "").replace(bot_tag.lower(), "")
+    return result.strip()
 
 
 # ---------- Бизнес-подключение ----------
@@ -164,7 +194,13 @@ async def cmd_help(message: types.Message):
     )
 
 
-# ---------- Голосовые сообщения (личка бота) ----------
+@dp.message(Command("chatid"))
+async def cmd_chatid(message: types.Message):
+    """Показывает chat_id — удобно для настройки белого списка."""
+    await message.reply(f"Chat ID: {message.chat.id}")
+
+
+# ---------- Голосовые сообщения ----------
 
 async def _transcribe_voice(message: types.Message) -> str | None:
     """Скачивает голосовое сообщение и транскрибирует через Groq Whisper."""
@@ -183,6 +219,17 @@ async def _transcribe_voice(message: types.Message) -> str | None:
 
     logger.info(f"[голос транскрипция] {text[:100]!r}")
     return text
+
+
+async def _download_photo(message: types.Message) -> bytes | None:
+    """Скачивает фото из сообщения (берёт наибольший размер)."""
+    if not message.photo:
+        return None
+    # Telegram отправляет несколько размеров, берём последний (наибольший)
+    photo = message.photo[-1]
+    file = await bot.get_file(photo.file_id)
+    file_data = await bot.download_file(file.file_path)
+    return file_data.read()
 
 
 @dp.message(F.voice)
@@ -217,7 +264,83 @@ async def handle_voice(message: types.Message):
         logger.error(traceback.format_exc())
 
 
-# ---------- Обычные сообщения (личка бота + группы) ----------
+# ---------- Фото в группах ----------
+
+@dp.message(F.photo)
+async def handle_photo(message: types.Message):
+    """Обрабатывает фото/мемы в группах (по упоминанию бота в подписи)."""
+    is_group = message.chat.type in ("group", "supergroup")
+    is_private = message.chat.type == "private"
+
+    # В группах: только если бот упомянут в подписи (caption)
+    if is_group:
+        if not _is_group_allowed(message.chat.id):
+            return
+        caption = message.caption or ""
+        if not _is_bot_mentioned(caption):
+            return
+        question = _strip_bot_mention(caption)
+    elif is_private:
+        question = message.caption or ""
+    else:
+        return
+
+    logger.info(
+        f"[фото] chat_type={message.chat.type} chat_id={message.chat.id} "
+        f"user={message.from_user.id} caption={question[:50]!r}"
+    )
+
+    try:
+        await bot.send_chat_action(message.chat.id, "typing")
+
+        # Скачиваем фото
+        image_bytes = await _download_photo(message)
+        if not image_bytes:
+            return
+
+        logger.info(f"[фото] скачано {len(image_bytes)} байт")
+
+        # Определяем промпт и системный промпт в зависимости от контекста
+        if is_group:
+            sys_prompt = GROUP_SYSTEM_PROMPT
+            vision_prompt = question if question else "Прокомментируй эту картинку/мем коротко и с юмором."
+        else:
+            sys_prompt = None
+            vision_prompt = question if question else "Что на этой картинке?"
+
+        # Анализируем картинку через Groq Vision
+        history = _get_history(message.chat.id) if is_group else None
+        answer = await analyze_image(
+            image_bytes=image_bytes,
+            prompt=vision_prompt,
+            system_prompt=sys_prompt,
+            history=history,
+        )
+
+        if not answer:
+            logger.warning("[фото] пустой ответ от vision")
+            return
+
+        logger.info(f"[фото ответ] len={len(answer)} text={answer[:80]!r}")
+
+        # Сохраняем в историю для групп
+        if is_group:
+            user_desc = f"[картинка] {question}" if question else "[картинка]"
+            _add_to_history(message.chat.id, "user", user_desc)
+            _add_to_history(message.chat.id, "assistant", answer)
+
+        result = await bot.send_message(
+            chat_id=message.chat.id,
+            text=answer[:4096],
+            reply_to_message_id=message.message_id,
+        )
+        logger.info(f"[фото отправка OK] message_id={result.message_id}")
+    except Exception as e:
+        logger.error(f"[фото ошибка] {e}")
+        logger.error(traceback.format_exc())
+
+
+# ---------- Текстовые сообщения (личка + группы) ----------
 
 @dp.message(F.text)
 async def handle_message(message: types.Message):
@@ -231,10 +354,15 @@ async def handle_message(message: types.Message):
     is_group = message.chat.type in ("group", "supergroup")
 
     if is_group:
-        bot_tag = f"@{BOT_USERNAME}"
-        if bot_tag.lower() not in message.text.lower():
+        # Проверяем белый список
+        if not _is_group_allowed(message.chat.id):
             return
-        question = message.text.replace(bot_tag, "").replace(bot_tag.lower(), "").strip()
+
+        # Проверяем упоминание бота
+        if not _is_bot_mentioned(message.text):
+            return
+
+        question = _strip_bot_mention(message.text)
         if not question:
             await message.reply("Задай вопрос после упоминания.")
             return
@@ -245,7 +373,22 @@ async def handle_message(message: types.Message):
 
     try:
         await bot.send_chat_action(message.chat.id, "typing")
-        answer = await ask_perplexity(question)
+
+        if is_group:
+            # Групповой чат: используем GROUP_SYSTEM_PROMPT + историю
+            history = _get_history(message.chat.id)
+            answer = await ask_perplexity(
+                question,
+                system_prompt=GROUP_SYSTEM_PROMPT,
+                history=history,
+            )
+            # Сохраняем в историю
+            _add_to_history(message.chat.id, "user", question)
+            _add_to_history(message.chat.id, "assistant", answer)
+        else:
+            # Личка: без истории, стандартный промпт
+            answer = await ask_perplexity(question)
+
         logger.info(f"[ответ] len={len(answer)}")
         result = await bot.send_message(
             chat_id=message.chat.id,
@@ -286,6 +429,11 @@ async def handle_inline(inline_query: InlineQuery):
 
 async def main():
     logger.info(f"Бот запущен. BOT_USERNAME={BOT_USERNAME}")
+    if ALLOWED_GROUPS:
+        logger.info(f"Белый список групп: {ALLOWED_GROUPS}")
+    else:
+        logger.info("Белый список групп не задан — бот работает во всех группах")
+
     await dp.start_polling(
         bot,
         allowed_updates=[
