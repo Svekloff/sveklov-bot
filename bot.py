@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import traceback
+from collections import defaultdict
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart
@@ -11,7 +12,7 @@ from aiogram.types import (
     BusinessConnection,
 )
 
-from config import TELEGRAM_BOT_TOKEN, BOT_USERNAME, BUSINESS_SYSTEM_PROMPT
+from config import TELEGRAM_BOT_TOKEN, BOT_USERNAME, BUSINESS_SYSTEM_PROMPT, MAX_HISTORY
 from perplexity_client import ask_perplexity
 from speech_to_text import transcribe_voice
 
@@ -23,6 +24,23 @@ dp = Dispatcher()
 
 # Хранилище бизнес-подключений: {user_id: connection_id}
 business_connections: dict[int, str] = {}
+
+# Хранилище истории сообщений: {chat_id: [{"role": ..., "content": ...}, ...]}
+chat_histories: dict[int, list[dict]] = defaultdict(list)
+
+
+def _add_to_history(chat_id: int, role: str, content: str) -> None:
+    """Добавляет сообщение в историю чата, обрезая до MAX_HISTORY пар."""
+    chat_histories[chat_id].append({"role": role, "content": content})
+    # Храним не более MAX_HISTORY * 2 записей (пары user+assistant)
+    max_entries = MAX_HISTORY * 2
+    if len(chat_histories[chat_id]) > max_entries:
+        chat_histories[chat_id] = chat_histories[chat_id][-max_entries:]
+
+
+def _get_history(chat_id: int) -> list[dict]:
+    """Возвращает копию истории для передачи в API."""
+    return list(chat_histories[chat_id])
 
 
 # ---------- Бизнес-подключение ----------
@@ -95,12 +113,18 @@ async def handle_business_message(message: types.Message):
             business_connection_id=conn_id,
         )
 
-        # Используем бизнес-промпт: бот отвечает как Алексей
+        # Получаем историю диалога и отправляем в Perplexity
+        history = _get_history(message.chat.id)
         answer = await ask_perplexity(
             question,
             system_prompt=BUSINESS_SYSTEM_PROMPT,
+            history=history,
         )
         logger.info(f"[бизнес ответ] len={len(answer)} text={answer[:80]!r}")
+
+        # Сохраняем в историю: вопрос собеседника и ответ «Алексея»
+        _add_to_history(message.chat.id, "user", question)
+        _add_to_history(message.chat.id, "assistant", answer)
 
         result = await bot.send_message(
             chat_id=message.chat.id,
