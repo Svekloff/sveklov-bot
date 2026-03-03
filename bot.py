@@ -52,9 +52,9 @@ def _get_history(chat_id: int) -> list[dict]:
 
 
 def _is_group_allowed(chat_id: int) -> bool:
-    """Проверяет, есть ли группа в белом списке. Если список пуст — разрешены все."""
+    """Проверяет, есть ли группа в белом списке. Если список пуст — запрещены все."""
     if not ALLOWED_GROUPS:
-        return True
+        return False
     return chat_id in ALLOWED_GROUPS
 
 
@@ -432,7 +432,7 @@ async def main():
     if ALLOWED_GROUPS:
         logger.info(f"Белый список групп: {ALLOWED_GROUPS}")
     else:
-        logger.info("Белый список групп не задан — бот работает во всех группах")
+        logger.info("Белый список групп пуст — бот не отвечает ни в одной группе")
 
     await dp.start_polling(
         bot,
