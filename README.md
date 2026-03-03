@@ -1,41 +1,33 @@
-# SveklovBot
+# sveklov-bot
 
-Telegram ИИ-помощник с поддержкой текста, голоса, картинок и бизнес-режима.
+AI-powered Telegram bot built with aiogram 3 + Perplexity API.
 
-## Возможности
+## Features
 
-- **Личные сообщения** — отвечает на текст и голос
-- **Групповые чаты** — отвечает по упоминанию @SveklovBot, комментирует картинки и мемы
-- **Бизнес-режим** — отвечает от имени владельца аккаунта (Telegram Business)
-- **Inline-режим** — @SveklovBot запрос в любом чате
-- **Vision** — анализ картинок через Groq Vision (Llama 4 Scout)
-- **Голос** — распознавание через Groq Whisper
+- 💬 Private chat with conversation history
+- 🏢 Business account auto-reply mode
+- 👥 Group chat support (mention bot to trigger)
+- 🎤 Voice message transcription (Whisper)
+- 🖼 Image analysis
+- 🔍 Inline query mode
+- 📋 Group management via bot UI with inline keyboard
 
-## Стек
-
-- Python 3.12 + aiogram 3
-- Perplexity Sonar API (текстовые ответы)
-- Groq API (Whisper для голоса, Llama 4 Scout для картинок)
-- Docker + Railway
-
-## Настройка
-
-1. Скопировать `.env.example` → `.env`
-2. Заполнить токены
-3. (Опционально) Указать `ALLOWED_GROUPS` для ограничения групп
-
-### Узнать chat_id группы
-
-Добавьте бота в группу и отправьте `/chatid`.
-
-## Запуск
+## Setup
 
 ```bash
-docker compose up -d
+cp .env.example .env
+# Fill in your tokens
+pip install -r requirements.txt
+python bot.py
 ```
 
-## Команды
+## Commands
 
-- `/start` — приветствие
-- `/help` — инструкция
-- `/chatid` — показать chat_id текущего чата
+- `/start` — Welcome message
+- `/groups` — Manage active groups (owner only)
+
+## Docker
+
+```bash
+docker-compose up -d
+```

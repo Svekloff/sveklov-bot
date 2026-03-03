@@ -1,12 +1,9 @@
+version: "3.9"
 services:
-  sveklov-bot:
+  bot:
     build: .
-    container_name: sveklov-bot
     restart: unless-stopped
     env_file:
       - .env
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+    volumes:
+      - ./groups.json:/app/groups.json

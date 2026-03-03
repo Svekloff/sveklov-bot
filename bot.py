@@ -10,6 +10,10 @@ from aiogram.types import (
     InlineQueryResultArticle,
     InputTextMessageContent,
     BusinessConnection,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,
+    ChatMemberUpdated,
 )
 
 from config import (
@@ -18,11 +22,12 @@ from config import (
     BUSINESS_SYSTEM_PROMPT,
     GROUP_SYSTEM_PROMPT,
     MAX_HISTORY,
-    ALLOWED_GROUPS,
+    OWNER_ID,
 )
 from perplexity_client import ask_perplexity
 from speech_to_text import transcribe_voice
 from image_analyzer import analyze_image
+import group_manager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -33,33 +38,27 @@ dp = Dispatcher()
 # Хранилище бизнес-подключений: {user_id: connection_id}
 business_connections: dict[int, str] = {}
 
-# Хранилище истории сообщений: {chat_id: [{"role": ..., "content": ...}, ...]}
+# Хранилище истории сообщений: {chat_id: [{role, content}, ...]}
 chat_histories: dict[int, list[dict]] = defaultdict(list)
 
 
 def _add_to_history(chat_id: int, role: str, content: str) -> None:
-    """Добавляет сообщение в историю чата, обрезая до MAX_HISTORY пар."""
     chat_histories[chat_id].append({"role": role, "content": content})
-    # Храним не более MAX_HISTORY * 2 записей (пары user+assistant)
     max_entries = MAX_HISTORY * 2
     if len(chat_histories[chat_id]) > max_entries:
         chat_histories[chat_id] = chat_histories[chat_id][-max_entries:]
 
 
 def _get_history(chat_id: int) -> list[dict]:
-    """Возвращает копию истории для передачи в API."""
     return list(chat_histories[chat_id])
 
 
-def _is_group_allowed(chat_id: int) -> bool:
-    """Проверяет, есть ли группа в белом списке. Если список пуст — запрещены все."""
-    if not ALLOWED_GROUPS:
-        return False
-    return chat_id in ALLOWED_GROUPS
+def _is_owner(user_id: int) -> bool:
+    """Проверяет, является ли пользователь владельцем бота."""
+    return user_id == OWNER_ID
 
 
 def _is_bot_mentioned(text: str) -> bool:
-    """Проверяет, упомянут ли бот в тексте."""
     if not text:
         return False
     bot_tag = f"@{BOT_USERNAME}"
@@ -67,385 +66,267 @@ def _is_bot_mentioned(text: str) -> bool:
 
 
 def _strip_bot_mention(text: str) -> str:
-    """Убирает упоминание бота из текста."""
     bot_tag = f"@{BOT_USERNAME}"
-    result = text.replace(bot_tag, "").replace(bot_tag.lower(), "")
-    return result.strip()
+    result = text.replace(bot_tag, "").replace(bot_tag.lower(), "").strip()
+    return result
 
 
-# ---------- Бизнес-подключение ----------
-
-@dp.business_connection()
-async def handle_business_connection(update: BusinessConnection):
-    """Срабатывает, когда пользователь подключает/отключает бота как бизнес-бота."""
-    user = update.user
-    conn_id = update.id
-    is_enabled = update.is_enabled
-    can_reply = update.can_reply
-
-    logger.info(
-        f"[бизнес] Подключение: user={user.id} ({user.first_name}) "
-        f"connection_id={conn_id} enabled={is_enabled} can_reply={can_reply}"
-    )
-
-    if is_enabled and can_reply:
-        business_connections[user.id] = conn_id
-        logger.info(f"[бизнес] Сохранён connection_id={conn_id} для user={user.id}")
-    else:
-        business_connections.pop(user.id, None)
-        logger.info(f"[бизнес] Удалён connection_id для user={user.id}")
+def _build_groups_keyboard() -> InlineKeyboardMarkup:
+    """Строит инлайн-клавиатуру со списком активных групп."""
+    groups = group_manager.list_groups()
+    buttons = []
+    for gid, info in groups.items():
+        label = info.get("title") or str(gid)
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"group_info:{gid}")])
+    buttons.append([InlineKeyboardButton(text="➕ Добавить группу", callback_data="group_add")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-# ---------- Бизнес-сообщения (ответ от имени Алексея) ----------
-
-@dp.business_message()
-async def handle_business_message(message: types.Message):
-    """Обрабатывает сообщения от клиентов в бизнес-чатах (текст + голос)."""
-    conn_id = message.business_connection_id
-    if not conn_id:
-        return
-
-    # Определяем текст: из текстового или голосового сообщения
-    if message.voice:
-        logger.info(
-            f"[бизнес голос] chat_id={message.chat.id} "
-            f"user={message.from_user.id} conn_id={conn_id} "
-            f"duration={message.voice.duration}s"
-        )
-        try:
-            await bot.send_chat_action(
-                chat_id=message.chat.id,
-                action="typing",
-                business_connection_id=conn_id,
-            )
-            question = await _transcribe_voice(message)
-            if not question:
-                return
-        except Exception as e:
-            logger.error(f"[бизнес голос ошибка] {e}")
-            logger.error(traceback.format_exc())
-            return
-    elif message.text:
-        question = message.text
-    else:
-        return
-
-    logger.info(
-        f"[бизнес сообщение] chat_id={message.chat.id} "
-        f"user={message.from_user.id} conn_id={conn_id} "
-        f"text={question[:50]!r}"
-    )
-
-    try:
-        await bot.send_chat_action(
-            chat_id=message.chat.id,
-            action="typing",
-            business_connection_id=conn_id,
-        )
-
-        # Получаем историю диалога и отправляем в Perplexity
-        history = _get_history(message.chat.id)
-        answer = await ask_perplexity(
-            question,
-            system_prompt=BUSINESS_SYSTEM_PROMPT,
-            history=history,
-        )
-        logger.info(f"[бизнес ответ] len={len(answer)} text={answer[:80]!r}")
-
-        # Сохраняем в историю: вопрос собеседника и ответ «Алексея»
-        _add_to_history(message.chat.id, "user", question)
-        _add_to_history(message.chat.id, "assistant", answer)
-
-        result = await bot.send_message(
-            chat_id=message.chat.id,
-            text=answer[:4096],
-            business_connection_id=conn_id,
-        )
-        logger.info(f"[бизнес отправка OK] message_id={result.message_id}")
-    except Exception as e:
-        logger.error(f"[бизнес ошибка] {e}")
-        logger.error(traceback.format_exc())
+def _build_group_detail_keyboard(group_id: int) -> InlineKeyboardMarkup:
+    """Строит клавиатуру для управления конкретной группой."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🗑 Удалить группу", callback_data=f"group_remove:{group_id}")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="group_list")],
+    ])
 
 
-# ---------- Команды ----------
+# ─── Handlers ────────────────────────────────────────────────────────────────
 
 @dp.message(CommandStart())
-async def cmd_start(message: types.Message):
-    logger.info(f"[/start] chat_id={message.chat.id} user={message.from_user.id}")
-    await bot.send_message(
-        chat_id=message.chat.id,
-        text=(
-            "Привет!\n\n"
-            "Я — ИИ-помощник с доступом к интернету.\n\n"
-            "• Напиши мне любой вопрос в личку\n"
-            "• Упомяни @" + BOT_USERNAME + " в группе\n"
-            "• Используй инлайн-режим: @" + BOT_USERNAME + " твой вопрос"
-        ),
-    )
-
-
-@dp.message(Command("help"))
-async def cmd_help(message: types.Message):
+async def cmd_start(message: types.Message) -> None:
     await message.answer(
-        "Как пользоваться:\n\n"
-        "1. Личное сообщение — просто напиши вопрос\n"
-        "2. Группа — упомяни @" + BOT_USERNAME + "\n"
-        "3. Инлайн — @" + BOT_USERNAME + " и вопрос"
+        "Привет! Я AI-ассистент.\n"
+        "• Напишите мне в личку — отвечу.\n"
+        "• Упомяните меня в группе — отвечу там.\n"
+        "• Подключите бизнес-аккаунт — буду отвечать за вас."
     )
 
 
-@dp.message(Command("chatid"))
-async def cmd_chatid(message: types.Message):
-    """Показывает chat_id — удобно для настройки белого списка."""
-    await message.reply(f"Chat ID: {message.chat.id}")
-
-
-# ---------- Голосовые сообщения ----------
-
-async def _transcribe_voice(message: types.Message) -> str | None:
-    """Скачивает голосовое сообщение и транскрибирует через Groq Whisper."""
-    voice = message.voice
-    file = await bot.get_file(voice.file_id)
-    file_data = await bot.download_file(file.file_path)
-
-    # file_data — BytesIO объект
-    audio_bytes = file_data.read()
-    logger.info(f"[голос] скачано {len(audio_bytes)} байт, duration={voice.duration}s")
-
-    text = await transcribe_voice(audio_bytes)
-    if not text:
-        logger.warning("[голос] пустая транскрипция")
-        return None
-
-    logger.info(f"[голос транскрипция] {text[:100]!r}")
-    return text
-
-
-async def _download_photo(message: types.Message) -> bytes | None:
-    """Скачивает фото из сообщения (берёт наибольший размер)."""
-    if not message.photo:
-        return None
-    # Telegram отправляет несколько размеров, берём последний (наибольший)
-    photo = message.photo[-1]
-    file = await bot.get_file(photo.file_id)
-    file_data = await bot.download_file(file.file_path)
-    return file_data.read()
-
-
-@dp.message(F.voice)
-async def handle_voice(message: types.Message):
-    """Обрабатывает голосовые сообщения в личке бота."""
-    if message.chat.type != "private":
+@dp.message(Command("groups"))
+async def cmd_groups(message: types.Message) -> None:
+    """Показывает список активных групп с инлайн-кнопками."""
+    if not _is_owner(message.from_user.id):
+        await message.answer("Эта команда доступна только владельцу бота.")
         return
+    groups = group_manager.list_groups()
+    if not groups:
+        text = "Активных групп нет.\nДобавьте бота в группу и он зарегистрируется автоматически."
+    else:
+        text = f"Активные группы ({len(groups)}):"
+    await message.answer(text, reply_markup=_build_groups_keyboard())
 
-    logger.info(
-        f"[голос] chat_id={message.chat.id} user={message.from_user.id} "
-        f"duration={message.voice.duration}s"
+
+@dp.callback_query(F.data == "group_list")
+async def cb_group_list(callback: CallbackQuery) -> None:
+    """Возврат к списку групп."""
+    if not _is_owner(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    groups = group_manager.list_groups()
+    text = f"Активные группы ({len(groups)}):" if groups else "Активных групп нет."
+    await callback.message.edit_text(text, reply_markup=_build_groups_keyboard())
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("group_info:"))
+async def cb_group_info(callback: CallbackQuery) -> None:
+    """Показывает детали группы."""
+    if not _is_owner(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    group_id = int(callback.data.split(":", 1)[1])
+    groups = group_manager.list_groups()
+    info = groups.get(group_id) or groups.get(str(group_id))
+    if not info:
+        await callback.answer("Группа не найдена", show_alert=True)
+        return
+    title = info.get("title") or str(group_id)
+    added = info.get("added_at", "неизвестно")
+    text = f"📋 <b>{title}</b>\nID: <code>{group_id}</code>\nДобавлена: {added}"
+    await callback.message.edit_text(
+        text,
+        reply_markup=_build_group_detail_keyboard(group_id),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("group_remove:"))
+async def cb_group_remove(callback: CallbackQuery) -> None:
+    """Удаляет группу из активных."""
+    if not _is_owner(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    group_id = int(callback.data.split(":", 1)[1])
+    removed = group_manager.remove_group(group_id)
+    if removed:
+        await callback.answer("Группа удалена", show_alert=True)
+    else:
+        await callback.answer("Группа не найдена", show_alert=True)
+    # Возврат к списку
+    groups = group_manager.list_groups()
+    text = f"Активные группы ({len(groups)}):" if groups else "Активных групп нет."
+    await callback.message.edit_text(text, reply_markup=_build_groups_keyboard())
+
+
+@dp.callback_query(F.data == "group_add")
+async def cb_group_add(callback: CallbackQuery) -> None:
+    """Инструкция по добавлению группы."""
+    if not _is_owner(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await callback.message.edit_text(
+        "Чтобы добавить группу:\n"
+        "1. Добавьте бота в нужную группу\n"
+        "2. Дайте боту права администратора\n"
+        "3. Группа автоматически появится в списке",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="group_list")]
+        ])
+    )
+    await callback.answer()
+
+
+@dp.my_chat_member()
+async def on_my_chat_member(update: ChatMemberUpdated) -> None:
+    """Обрабатывает добавление/удаление бота в группы."""
+    chat = update.chat
+    new_status = update.new_chat_member.status
+    if chat.type in ("group", "supergroup"):
+        if new_status in ("member", "administrator"):
+            group_manager.add_group(chat.id, chat.title or str(chat.id))
+            logger.info("Bot added to group: %s (%s)", chat.title, chat.id)
+        elif new_status in ("left", "kicked"):
+            group_manager.remove_group(chat.id)
+            logger.info("Bot removed from group: %s (%s)", chat.title, chat.id)
+
+
+@dp.business_connection()
+async def on_business_connection(connection: BusinessConnection) -> None:
+    if connection.is_enabled:
+        business_connections[connection.user.id] = connection.id
+        logger.info("Business connection established: user=%s", connection.user.id)
+    else:
+        business_connections.pop(connection.user.id, None)
+        logger.info("Business connection removed: user=%s", connection.user.id)
+
+
+@dp.business_message()
+async def handle_business_message(message: types.Message) -> None:
+    user_id = message.chat.id
+    connection_id = business_connections.get(user_id)
+    if not connection_id:
+        return
+    text = message.text or message.caption or ""
+    if not text.strip():
+        return
+    _add_to_history(user_id, "user", text)
+    history = _get_history(user_id)
+    try:
+        reply = await ask_perplexity(text, history=history, system_prompt=BUSINESS_SYSTEM_PROMPT)
+    except Exception as e:
+        logger.error("Perplexity error: %s", e)
+        return
+    _add_to_history(user_id, "assistant", reply)
+    await bot.send_message(
+        chat_id=user_id,
+        text=reply,
+        business_connection_id=connection_id,
     )
 
-    try:
-        await bot.send_chat_action(message.chat.id, "typing")
-        question = await _transcribe_voice(message)
-        if not question:
-            await message.reply("Не удалось распознать голосовое сообщение.")
+
+@dp.message(F.chat.type == "private")
+async def handle_private_message(message: types.Message) -> None:
+    user_id = message.from_user.id
+    text = ""
+
+    if message.voice:
+        try:
+            text = await transcribe_voice(bot, message.voice)
+        except Exception as e:
+            logger.error("Voice transcription error: %s", e)
+            await message.answer("Не удалось распознать голосовое сообщение.")
             return
-
-        await bot.send_chat_action(message.chat.id, "typing")
-        answer = await ask_perplexity(question)
-        logger.info(f"[голос ответ] len={len(answer)}")
-        result = await bot.send_message(
-            chat_id=message.chat.id,
-            text=answer[:4096],
-            reply_to_message_id=message.message_id,
-        )
-        logger.info(f"[голос отправка OK] message_id={result.message_id}")
-    except Exception as e:
-        logger.error(f"[голос ошибка] {e}")
-        logger.error(traceback.format_exc())
-
-
-# ---------- Фото в группах ----------
-
-@dp.message(F.photo)
-async def handle_photo(message: types.Message):
-    """Обрабатывает фото/мемы в группах (по упоминанию бота в подписи)."""
-    is_group = message.chat.type in ("group", "supergroup")
-    is_private = message.chat.type == "private"
-
-    # В группах: только если бот упомянут в подписи (caption)
-    if is_group:
-        if not _is_group_allowed(message.chat.id):
-            return
+    elif message.photo:
         caption = message.caption or ""
-        if not _is_bot_mentioned(caption):
+        try:
+            text = await analyze_image(bot, message.photo[-1], caption)
+        except Exception as e:
+            logger.error("Image analysis error: %s", e)
+            await message.answer("Не удалось проанализировать изображение.")
             return
-        question = _strip_bot_mention(caption)
-    elif is_private:
-        question = message.caption or ""
     else:
+        text = message.text or ""
+
+    if not text.strip():
         return
 
-    logger.info(
-        f"[фото] chat_type={message.chat.type} chat_id={message.chat.id} "
-        f"user={message.from_user.id} caption={question[:50]!r}"
-    )
-
+    _add_to_history(user_id, "user", text)
+    history = _get_history(user_id)
     try:
-        await bot.send_chat_action(message.chat.id, "typing")
+        reply = await ask_perplexity(text, history=history)
+    except Exception as e:
+        logger.error("Perplexity error: %s", traceback.format_exc())
+        await message.answer("Произошла ошибка при обращении к AI.")
+        return
+    _add_to_history(user_id, "assistant", reply)
+    await message.answer(reply)
 
-        # Скачиваем фото
-        image_bytes = await _download_photo(message)
-        if not image_bytes:
-            return
 
-        logger.info(f"[фото] скачано {len(image_bytes)} байт")
-
-        # Определяем промпт и системный промпт в зависимости от контекста
-        if is_group:
-            sys_prompt = GROUP_SYSTEM_PROMPT
-            vision_prompt = question if question else "Прокомментируй эту картинку/мем коротко и с юмором."
-        else:
-            sys_prompt = None
-            vision_prompt = question if question else "Что на этой картинке?"
-
-        # Анализируем картинку через Groq Vision
-        history = _get_history(message.chat.id) if is_group else None
-        answer = await analyze_image(
-            image_bytes=image_bytes,
-            prompt=vision_prompt,
-            system_prompt=sys_prompt,
+@dp.message(F.chat.type.in_({"group", "supergroup"}))
+async def handle_group_message(message: types.Message) -> None:
+    text = message.text or message.caption or ""
+    if not _is_bot_mentioned(text):
+        return
+    clean_text = _strip_bot_mention(text)
+    if not clean_text.strip():
+        await message.answer("Чем могу помочь?")
+        return
+    chat_id = message.chat.id
+    _add_to_history(chat_id, "user", clean_text)
+    history = _get_history(chat_id)
+    try:
+        reply = await ask_perplexity(
+            clean_text,
             history=history,
+            system_prompt=GROUP_SYSTEM_PROMPT,
         )
-
-        if not answer:
-            logger.warning("[фото] пустой ответ от vision")
-            return
-
-        logger.info(f"[фото ответ] len={len(answer)} text={answer[:80]!r}")
-
-        # Сохраняем в историю для групп
-        if is_group:
-            user_desc = f"[картинка] {question}" if question else "[картинка]"
-            _add_to_history(message.chat.id, "user", user_desc)
-            _add_to_history(message.chat.id, "assistant", answer)
-
-        result = await bot.send_message(
-            chat_id=message.chat.id,
-            text=answer[:4096],
-            reply_to_message_id=message.message_id,
-        )
-        logger.info(f"[фото отправка OK] message_id={result.message_id}")
     except Exception as e:
-        logger.error(f"[фото ошибка] {e}")
-        logger.error(traceback.format_exc())
-
-
-# ---------- Текстовые сообщения (личка + группы) ----------
-
-@dp.message(F.text)
-async def handle_message(message: types.Message):
-    logger.info(
-        f"[сообщение] chat_type={message.chat.type} "
-        f"chat_id={message.chat.id} user={message.from_user.id} "
-        f"text={message.text[:50]!r}"
-    )
-
-    is_private = message.chat.type == "private"
-    is_group = message.chat.type in ("group", "supergroup")
-
-    if is_group:
-        # Проверяем белый список
-        if not _is_group_allowed(message.chat.id):
-            return
-
-        # Проверяем упоминание бота
-        if not _is_bot_mentioned(message.text):
-            return
-
-        question = _strip_bot_mention(message.text)
-        if not question:
-            await message.reply("Задай вопрос после упоминания.")
-            return
-    elif is_private:
-        question = message.text
-    else:
+        logger.error("Perplexity error in group: %s", traceback.format_exc())
+        await message.answer("Произошла ошибка при обращении к AI.")
         return
+    _add_to_history(chat_id, "assistant", reply)
+    await message.answer(reply)
 
-    try:
-        await bot.send_chat_action(message.chat.id, "typing")
-
-        if is_group:
-            # Групповой чат: используем GROUP_SYSTEM_PROMPT + историю
-            history = _get_history(message.chat.id)
-            answer = await ask_perplexity(
-                question,
-                system_prompt=GROUP_SYSTEM_PROMPT,
-                history=history,
-            )
-            # Сохраняем в историю
-            _add_to_history(message.chat.id, "user", question)
-            _add_to_history(message.chat.id, "assistant", answer)
-        else:
-            # Личка: без истории, стандартный промпт
-            answer = await ask_perplexity(question)
-
-        logger.info(f"[ответ] len={len(answer)}")
-        result = await bot.send_message(
-            chat_id=message.chat.id,
-            text=answer[:4096],
-            reply_to_message_id=message.message_id if is_group else None,
-        )
-        logger.info(f"[отправка OK] message_id={result.message_id}")
-    except Exception as e:
-        logger.error(f"[ошибка] {e}")
-        logger.error(traceback.format_exc())
-
-
-# ---------- Инлайн-режим ----------
 
 @dp.inline_query()
-async def handle_inline(inline_query: InlineQuery):
-    query_text = inline_query.query.strip()
-    if not query_text:
-        return
-
-    try:
-        answer = await ask_perplexity(query_text)
-        short_answer = answer[:200] + "…" if len(answer) > 200 else answer
-        result = InlineQueryResultArticle(
-            id="1",
-            title=f"Ответ на: {query_text[:50]}",
-            description=short_answer,
-            input_message_content=InputTextMessageContent(
-                message_text=answer[:4096],
-            ),
+async def handle_inline(query: InlineQuery) -> None:
+    q = query.query.strip()
+    if not q:
+        await query.answer(
+            [],
+            switch_pm_text="Введите запрос для поиска",
+            switch_pm_parameter="inline_help",
+            cache_time=1,
         )
-        await inline_query.answer([result], cache_time=30)
+        return
+    try:
+        answer = await ask_perplexity(q)
     except Exception as e:
-        logger.error(f"[инлайн ошибка] {e}")
-
-
-# ---------- Запуск ----------
-
-async def main():
-    logger.info(f"Бот запущен. BOT_USERNAME={BOT_USERNAME}")
-    if ALLOWED_GROUPS:
-        logger.info(f"Белый список групп: {ALLOWED_GROUPS}")
-    else:
-        logger.info("Белый список групп пуст — бот не отвечает ни в одной группе")
-
-    await dp.start_polling(
-        bot,
-        allowed_updates=[
-            "message",
-            "edited_message",
-            "inline_query",
-            "business_connection",
-            "business_message",
-            "edited_business_message",
-            "deleted_business_messages",
-        ],
+        logger.error("Inline query error: %s", e)
+        answer = "Ошибка при получении ответа."
+    result = InlineQueryResultArticle(
+        id="1",
+        title=q[:50],
+        input_message_content=InputTextMessageContent(message_text=answer),
+        description=answer[:100],
     )
+    await query.answer([result], cache_time=5)
+
+
+async def main() -> None:
+    logger.info("Starting bot...")
+    await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
