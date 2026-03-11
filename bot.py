@@ -5,6 +5,7 @@ from collections import defaultdict
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart
+from aiogram.enums import ParseMode
 from aiogram.types import (
     InlineQuery,
     InlineQueryResultArticle,
@@ -71,6 +72,31 @@ def _strip_bot_mention(text: str) -> str:
     return result.strip()
 
 
+async def _safe_send(
+    chat_id: int,
+    text: str,
+    reply_to_message_id: int | None = None,
+    business_connection_id: str | None = None,
+) -> None:
+    """Отправляет сообщение с Markdown. Если парсинг падает — отправляет plain text."""
+    kwargs = {
+        "chat_id": chat_id,
+        "text": text[:4096],
+        "parse_mode": ParseMode.MARKDOWN,
+    }
+    if reply_to_message_id:
+        kwargs["reply_to_message_id"] = reply_to_message_id
+    if business_connection_id:
+        kwargs["business_connection_id"] = business_connection_id
+
+    try:
+        await bot.send_message(**kwargs)
+    except Exception:
+        # Markdown-парсинг провалился — отправляем без форматирования
+        kwargs.pop("parse_mode", None)
+        await bot.send_message(**kwargs)
+
+
 def _get_reply_context(message: types.Message) -> str | None:
     """Извлекает текст сообщения, на которое ответили (reply).
 
@@ -114,9 +140,11 @@ async def handle_my_chat_member(update: ChatMemberUpdated):
     old_status = update.old_chat_member.status
 
     if new_status in ("member", "administrator") and old_status in ("left", "kicked"):
+        # Бот добавлен в группу
         group_manager.register_group(chat.id, chat.title or f"Группа {chat.id}")
         logger.info(f"[группы] бот добавлен в: {chat.id} ({chat.title})")
     elif new_status in ("left", "kicked") and old_status in ("member", "administrator"):
+        # Бот удалён из группы
         group_manager.unregister_group(chat.id)
         logger.info(f"[группы] бот удалён из: {chat.id} ({chat.title})")
 
@@ -218,6 +246,7 @@ async def handle_toggle_group(callback: CallbackQuery):
     else:
         await callback.answer(f"Бот выключен в «{group_name}»")
 
+    # Обновляем сообщение с новой клавиатурой
     text = _groups_status_text()
     keyboard = _build_groups_keyboard()
     await callback.message.edit_text(text, reply_markup=keyboard)
@@ -336,6 +365,7 @@ async def cmd_start(message: types.Message):
     logger.info(f"[/start] chat_id={message.chat.id} user={message.from_user.id}")
 
     if _is_owner(message.from_user.id) and message.chat.type == "private":
+        # Для владельца показываем расширенное меню
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Управление группами", callback_data="open_groups")]
         ])
@@ -442,10 +472,10 @@ async def handle_voice(message: types.Message):
             return
 
         await bot.send_chat_action(message.chat.id, "typing")
-        answer = await ask_perplexity(question)
-        await bot.send_message(
+        answer = await ask_perplexity(question, format_markdown=True)
+        await _safe_send(
             chat_id=message.chat.id,
-            text=answer[:4096],
+            text=answer,
             reply_to_message_id=message.message_id,
         )
     except Exception as e:
@@ -513,9 +543,9 @@ async def handle_photo(message: types.Message):
             _add_to_history(message.chat.id, "user", user_desc)
             _add_to_history(message.chat.id, "assistant", answer)
 
-        await bot.send_message(
+        await _safe_send(
             chat_id=message.chat.id,
-            text=answer[:4096],
+            text=answer,
             reply_to_message_id=message.message_id,
         )
     except Exception as e:
@@ -571,15 +601,16 @@ async def handle_message(message: types.Message):
                 question,
                 system_prompt=GROUP_SYSTEM_PROMPT,
                 history=history,
+                format_markdown=True,
             )
             _add_to_history(message.chat.id, "user", question)
             _add_to_history(message.chat.id, "assistant", answer)
         else:
-            answer = await ask_perplexity(question)
+            answer = await ask_perplexity(question, format_markdown=True)
 
-        await bot.send_message(
+        await _safe_send(
             chat_id=message.chat.id,
-            text=answer[:4096],
+            text=answer,
             reply_to_message_id=message.message_id if is_group else None,
         )
     except Exception as e:
@@ -596,7 +627,7 @@ async def handle_inline(inline_query: InlineQuery):
         return
 
     try:
-        answer = await ask_perplexity(query_text)
+        answer = await ask_perplexity(query_text, format_markdown=True)
         short_answer = answer[:200] + "…" if len(answer) > 200 else answer
         result = InlineQueryResultArticle(
             id="1",
@@ -604,9 +635,22 @@ async def handle_inline(inline_query: InlineQuery):
             description=short_answer,
             input_message_content=InputTextMessageContent(
                 message_text=answer[:4096],
+                parse_mode=ParseMode.MARKDOWN,
             ),
         )
-        await inline_query.answer([result], cache_time=30)
+        try:
+            await inline_query.answer([result], cache_time=30)
+        except Exception:
+            # Markdown не прошёл — отправляем без форматирования
+            result = InlineQueryResultArticle(
+                id="1",
+                title=f"Ответ на: {query_text[:50]}",
+                description=short_answer,
+                input_message_content=InputTextMessageContent(
+                    message_text=answer[:4096],
+                ),
+            )
+            await inline_query.answer([result], cache_time=30)
     except Exception as e:
         logger.error(f"[инлайн ошибка] {e}")
 
