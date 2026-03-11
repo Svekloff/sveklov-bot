@@ -72,6 +72,11 @@ def _strip_bot_mention(text: str) -> str:
     return result.strip()
 
 
+def _escape_html(text: str) -> str:
+    """Экранирует спецсимволы HTML."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 async def _safe_send(
     chat_id: int,
     text: str,
@@ -629,25 +634,33 @@ async def handle_inline(inline_query: InlineQuery):
     try:
         answer = await ask_perplexity(query_text, format_markdown=True)
         short_answer = answer[:200] + "…" if len(answer) > 200 else answer
+
+        # Формируем сообщение: цитата с вопросом + ответ
+        from perplexity_client import markdown_to_html
+        answer_html = markdown_to_html(answer)
+        escaped_query = _escape_html(query_text)
+        full_message = f"<blockquote>{escaped_query}</blockquote>\n\n{answer_html}"
+
         result = InlineQueryResultArticle(
             id="1",
             title=f"Ответ на: {query_text[:50]}",
             description=short_answer,
             input_message_content=InputTextMessageContent(
-                message_text=answer[:4096],
-                parse_mode=ParseMode.MARKDOWN,
+                message_text=full_message[:4096],
+                parse_mode=ParseMode.HTML,
             ),
         )
         try:
             await inline_query.answer([result], cache_time=30)
         except Exception:
-            # Markdown не прошёл — отправляем без форматирования
+            # HTML-парсинг не прошёл — отправляем plain text с текстовой цитатой
+            plain_message = f"«{query_text}»\n\n{answer}"
             result = InlineQueryResultArticle(
                 id="1",
                 title=f"Ответ на: {query_text[:50]}",
                 description=short_answer,
                 input_message_content=InputTextMessageContent(
-                    message_text=answer[:4096],
+                    message_text=plain_message[:4096],
                 ),
             )
             await inline_query.answer([result], cache_time=30)

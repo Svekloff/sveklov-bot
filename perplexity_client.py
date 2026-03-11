@@ -68,6 +68,63 @@ def _sanitize_markdown(text: str) -> str:
     return text.strip()
 
 
+def markdown_to_html(text: str) -> str:
+    """Конвертирует Telegram Markdown (v1) в HTML для Telegram.
+
+    Поддерживает: *bold* → <b>, _italic_ → <i>, `code` → <code>,
+    ```code blocks``` → <pre>, [text](url) → <a href>.
+    """
+    # Экранируем HTML-спецсимволы, но сохраняем Markdown-символы
+    # Сначала защищаем Markdown-ссылки
+    links = []
+
+    def save_link(m: re.Match) -> str:
+        links.append((m.group(1), m.group(2)))
+        return f"\x00LINK{len(links) - 1}\x00"
+
+    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', save_link, text)
+
+    # Защищаем блоки кода
+    code_blocks = []
+
+    def save_code_block(m: re.Match) -> str:
+        code_blocks.append(m.group(1))
+        return f"\x00CODEBLOCK{len(code_blocks) - 1}\x00"
+
+    text = re.sub(r'```(?:\w*\n)?(.+?)```', save_code_block, text, flags=re.DOTALL)
+
+    # Защищаем инлайн-код
+    inline_codes = []
+
+    def save_inline_code(m: re.Match) -> str:
+        inline_codes.append(m.group(1))
+        return f"\x00ICODE{len(inline_codes) - 1}\x00"
+
+    text = re.sub(r'`([^`]+)`', save_inline_code, text)
+
+    # Теперь экранируем HTML
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    # Конвертируем форматирование
+    text = re.sub(r'\*(.+?)\*', r'<b>\1</b>', text)
+    text = re.sub(r'_(.+?)_', r'<i>\1</i>', text)
+
+    # Восстанавливаем защищённые элементы
+    for i, code in enumerate(inline_codes):
+        escaped_code = code.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        text = text.replace(f"\x00ICODE{i}\x00", f"<code>{escaped_code}</code>")
+
+    for i, code in enumerate(code_blocks):
+        escaped_code = code.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        text = text.replace(f"\x00CODEBLOCK{i}\x00", f"<pre>{escaped_code}</pre>")
+
+    for i, (link_text, url) in enumerate(links):
+        escaped_text = link_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        text = text.replace(f"\x00LINK{i}\x00", f'<a href="{url}">{escaped_text}</a>')
+
+    return text
+
+
 def _ensure_alternating(messages: list[dict]) -> list[dict]:
     """Гарантирует чередование user/assistant после system.
 
